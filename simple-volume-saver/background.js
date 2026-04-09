@@ -20,66 +20,138 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:']);
+const TAB_OVERRIDES_KEY = 'tabVolumeOverrides';
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete') {
+  if (changeInfo.status === 'complete' || changeInfo.audible !== undefined) {
     handleTabAudio(tabId, tab);
   }
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.audible !== undefined) {
-    handleTabAudio(tabId, tab);
-  }
-});
-
-function handleTabAudio(tabId, tab) {
-  chrome.storage.sync.get(['siteList'], (data) => {
-    const siteList = data.siteList || {};
-    
-    for (let site in siteList) {
-      if (tab.url.includes(site)) {
-        const volume = siteList[site];
-        
-        chrome.scripting.executeScript({
-          target: { tabId: tabId },
-          func: (volume) => {
-            const setMediaVolume = (mediaElements) => {
-              mediaElements.forEach(media => {
-                if (!media.paused || media.currentTime > 0) {
-                  media.volume = volume / 100;
-                }
-              });
-            };
-
-            setMediaVolume(document.querySelectorAll("video, audio"));
-
-            const observer = new MutationObserver((mutations) => {
-              const mediaElements = document.querySelectorAll("video, audio");
-              if (mediaElements.length > 0) {
-                setMediaVolume(mediaElements);
-              }
-            });
-
-            observer.observe(document.body, {
-              childList: true,
-              subtree: true
-            });
-
-            document.addEventListener('play', (event) => {
-              if (event.target.tagName === 'VIDEO' || event.target.tagName === 'AUDIO') {
-                event.target.volume = volume / 100;
-              }
-            }, true);
-
-            window.addEventListener('unload', () => {
-              observer.disconnect();
-            });
-          },
-          args: [volume]
-        });
-        
-        break;
-      }
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  try {
+    const data = await chrome.storage.session.get([TAB_OVERRIDES_KEY]);
+    const overrides = data?.[TAB_OVERRIDES_KEY] || {};
+    if (Object.prototype.hasOwnProperty.call(overrides, String(tabId))) {
+      delete overrides[String(tabId)];
+      await chrome.storage.session.set({ [TAB_OVERRIDES_KEY]: overrides });
     }
-  });
+  } catch {
+    // Ignore session storage issues.
+  }
+});
+
+async function handleTabAudio(tabId, tab) {
+  const origin = getOrigin(tab?.url);
+  if (!origin) {
+    return;
+  }
+
+  let syncData;
+  let sessionData;
+  try {
+    [syncData, sessionData] = await Promise.all([
+      chrome.storage.sync.get(['siteList']),
+      chrome.storage.session.get([TAB_OVERRIDES_KEY])
+    ]);
+  } catch {
+    return;
+  }
+
+  const siteList = syncData?.siteList || {};
+  const overrides = sessionData?.[TAB_OVERRIDES_KEY] || {};
+  const tabOverride = overrides[String(tabId)];
+  const hasSiteRule = Object.prototype.hasOwnProperty.call(siteList, origin);
+  const hasTabOverride = tabOverride !== undefined;
+
+  if (!hasTabOverride && !hasSiteRule) {
+    return;
+  }
+
+  const volume = clampVolume(hasTabOverride ? tabOverride : siteList[origin]);
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: (nextVolume) => {
+        const normalizedVolume = Math.max(0, Math.min(100, Number(nextVolume))) / 100;
+
+        window.__svsVolume = normalizedVolume;
+
+        const setMediaVolume = (mediaElements) => {
+          mediaElements.forEach((media) => {
+            media.volume = window.__svsVolume;
+          });
+        };
+
+        const applyToAllMedia = () => {
+          setMediaVolume(document.querySelectorAll('video, audio'));
+        };
+
+        applyToAllMedia();
+
+        if (window.__svsInitialized) {
+          return;
+        }
+
+        window.__svsInitialized = true;
+
+        const observer = new MutationObserver(() => {
+          applyToAllMedia();
+        });
+
+        if (document.body) {
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+        }
+
+        window.__svsObserver = observer;
+
+        document.addEventListener('play', (event) => {
+          const media = event.target;
+          if (media && (media.tagName === 'VIDEO' || media.tagName === 'AUDIO')) {
+            media.volume = window.__svsVolume;
+          }
+        }, true);
+
+        window.addEventListener('beforeunload', () => {
+          if (window.__svsObserver) {
+            window.__svsObserver.disconnect();
+            window.__svsObserver = null;
+          }
+          window.__svsInitialized = false;
+        });
+      },
+      args: [volume]
+    });
+  } catch {
+    // Ignore tabs where script injection is not allowed.
+  }
+}
+
+function getOrigin(url) {
+  if (!url) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (!SUPPORTED_PROTOCOLS.has(parsed.protocol)) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function clampVolume(rawVolume) {
+  const num = Number(rawVolume);
+  if (Number.isNaN(num)) {
+    return 100;
+  }
+  return Math.max(0, Math.min(100, Math.round(num)));
 }

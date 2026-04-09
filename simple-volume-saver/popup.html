@@ -2,26 +2,23 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Simple Volume Saver</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <link rel="stylesheet" href="popup.css">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body>
-  <div class="main-background text-white p-4">
-    <h2 class="fs-5 fw-bold">Simple Volume Saver</h2>
-    <div class="mb-3 d-flex align-items-center">
-      <input type="range" id="volumeSlider" min="0" max="100" value="100" step="1" class="form-range flex-grow-1">
-      <span id="volumeDisplay" class="fs-6 fw-light ms-auto text-end" style="min-width: 50px;">100%</span>
-    </div>    
-    <div class="mt-4">
-      <div class="d-flex align-items-center">
-        <h3 class="fs-6 fw-light mt-1">Saved sites</h3>
-        <button id="resetVolumeBtn" class="btn btn-outline-secondary btn-sm wider-button ms-auto">Reset Volume</button>
-        <button id="addSiteBtn" class="btn btn-outline-light btn-sm wide-button ms-auto">Add</button>
+  <main class="app-shell">
+    <section class="sites-section">
+      <div class="sites-header">
+        <h1 class="sites-title">Simple Volume Saver</h1>
+        <button id="addSiteBtn" type="button" class="btn btn-primary icon-btn-square" aria-label="Add current site">
+          <i class="fa-solid fa-plus fa-fw" aria-hidden="true"></i>
+        </button>
       </div>
-      <ul id="siteList" class="list-group mt-2 text-small fw-light"></ul>
-    </div>
-  </div>
+      <ul id="siteList" class="site-list"></ul>
+    </section>
+  </main>
 
   <script src="popup.js"></script>
 </body>
