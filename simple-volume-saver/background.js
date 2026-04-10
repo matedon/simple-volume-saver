@@ -22,6 +22,7 @@
 
 const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:']);
 const TAB_OVERRIDES_KEY = 'tabVolumeOverrides';
+const MAX_VOLUME = 500;
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' || changeInfo.audible !== undefined) {
@@ -74,19 +75,66 @@ async function handleTabAudio(tabId, tab) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      func: (nextVolume) => {
-        const normalizedVolume = Math.max(0, Math.min(100, Number(nextVolume))) / 100;
+      func: (nextVolume, maxVolume) => {
+        const requestedVolume = Number(nextVolume);
+        const safeVolume = Number.isFinite(requestedVolume)
+          ? Math.max(0, Math.min(maxVolume, requestedVolume))
+          : 100;
+        const gainValue = safeVolume / 100;
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
 
-        window.__svsVolume = normalizedVolume;
+        const applyFallbackVolume = (media) => {
+          media.volume = Math.max(0, Math.min(1, safeVolume / 100));
+        };
 
-        const setMediaVolume = (mediaElements) => {
-          mediaElements.forEach((media) => {
-            media.volume = window.__svsVolume;
-          });
+        const ensureGainNode = (media) => {
+          if (!AudioContextCtor) {
+            return null;
+          }
+
+          try {
+            if (!window.__svsAudioContext) {
+              window.__svsAudioContext = new AudioContextCtor();
+            }
+
+            if (!window.__svsGainNodeMap) {
+              window.__svsGainNodeMap = new WeakMap();
+            }
+
+            const ctx = window.__svsAudioContext;
+            let nodePack = window.__svsGainNodeMap.get(media);
+
+            if (!nodePack) {
+              const sourceNode = ctx.createMediaElementSource(media);
+              const gainNode = ctx.createGain();
+              sourceNode.connect(gainNode);
+              gainNode.connect(ctx.destination);
+              nodePack = { gainNode };
+              window.__svsGainNodeMap.set(media, nodePack);
+            }
+
+            nodePack.gainNode.gain.value = gainValue;
+            media.volume = 1;
+
+            if (ctx.state === 'suspended') {
+              ctx.resume().catch(() => {});
+            }
+
+            return nodePack;
+          } catch {
+            return null;
+          }
+        };
+
+        const applyToMedia = (media) => {
+          const nodePack = ensureGainNode(media);
+          if (!nodePack) {
+            applyFallbackVolume(media);
+          }
         };
 
         const applyToAllMedia = () => {
-          setMediaVolume(document.querySelectorAll('video, audio'));
+          document.querySelectorAll('video, audio').forEach((media) => applyToMedia(media));
         };
 
         applyToAllMedia();
@@ -113,7 +161,7 @@ async function handleTabAudio(tabId, tab) {
         document.addEventListener('play', (event) => {
           const media = event.target;
           if (media && (media.tagName === 'VIDEO' || media.tagName === 'AUDIO')) {
-            media.volume = window.__svsVolume;
+            applyToMedia(media);
           }
         }, true);
 
@@ -125,7 +173,7 @@ async function handleTabAudio(tabId, tab) {
           window.__svsInitialized = false;
         });
       },
-      args: [volume]
+      args: [volume, MAX_VOLUME]
     });
   } catch {
     // Ignore tabs where script injection is not allowed.
@@ -153,5 +201,5 @@ function clampVolume(rawVolume) {
   if (Number.isNaN(num)) {
     return 100;
   }
-  return Math.max(0, Math.min(100, Math.round(num)));
+  return Math.max(0, Math.min(MAX_VOLUME, Math.round(num)));
 }

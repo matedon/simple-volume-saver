@@ -22,8 +22,11 @@
 
 const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:']);
 const DEFAULT_VOLUME = 100;
+const MAX_VOLUME = 500;
 const VISIBLE_SITES_LIMIT = 12;
-const WHEEL_VOLUME_STEP = 2;
+const WHEEL_VOLUME_STEP = 5;
+const STICKY_MARK_STEP = 100;
+const STICKY_SNAP_TOLERANCE = 4;
 const VOLUME_COMMIT_DEBOUNCE_MS = 140;
 const TAB_OVERRIDES_KEY = 'tabVolumeOverrides';
 
@@ -49,14 +52,65 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       await chrome.scripting.executeScript({
         target: { tabId, allFrames: true },
-        func: (nextVolume) => {
-          const normalizedVolume = Math.max(0, Math.min(100, Number(nextVolume))) / 100;
-          window.__svsVolume = normalizedVolume;
+        func: (nextVolume, maxVolume) => {
+          const requestedVolume = Number(nextVolume);
+          const safeVolume = Number.isFinite(requestedVolume)
+            ? Math.max(0, Math.min(maxVolume, requestedVolume))
+            : 100;
+          const gainValue = safeVolume / 100;
+          const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+
+          const applyFallbackVolume = (media) => {
+            media.volume = Math.max(0, Math.min(1, safeVolume / 100));
+          };
+
+          const ensureGainNode = (media) => {
+            if (!AudioContextCtor) {
+              return null;
+            }
+
+            try {
+              if (!window.__svsAudioContext) {
+                window.__svsAudioContext = new AudioContextCtor();
+              }
+
+              if (!window.__svsGainNodeMap) {
+                window.__svsGainNodeMap = new WeakMap();
+              }
+
+              const ctx = window.__svsAudioContext;
+              let nodePack = window.__svsGainNodeMap.get(media);
+
+              if (!nodePack) {
+                const sourceNode = ctx.createMediaElementSource(media);
+                const gainNode = ctx.createGain();
+                sourceNode.connect(gainNode);
+                gainNode.connect(ctx.destination);
+                nodePack = { gainNode };
+                window.__svsGainNodeMap.set(media, nodePack);
+              }
+
+              nodePack.gainNode.gain.value = gainValue;
+              media.volume = 1;
+
+              if (ctx.state === 'suspended') {
+                ctx.resume().catch(() => {});
+              }
+
+              return nodePack;
+            } catch {
+              return null;
+            }
+          };
+
           document.querySelectorAll('video, audio').forEach((media) => {
-            media.volume = normalizedVolume;
+            const nodePack = ensureGainNode(media);
+            if (!nodePack) {
+              applyFallbackVolume(media);
+            }
           });
         },
-        args: [volume]
+        args: [volume, MAX_VOLUME]
       });
     } catch {
       // Ignore tabs where script injection is not allowed.
@@ -259,8 +313,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       ? 'var(--slider-playing)'
       : (isInactivePreset ? 'var(--slider-unsaved)' : (isSaved ? 'var(--slider-fill)' : 'var(--slider-unsaved)'));
 
-    rowEl.style.setProperty('--fill-percent', `${clampedVolume}%`);
+    const baseVolume = Math.min(clampedVolume, DEFAULT_VOLUME);
+    const baseFillPercent = (baseVolume / MAX_VOLUME) * 100;
+    const totalFillPercent = (clampedVolume / MAX_VOLUME) * 100;
+    rowEl.style.setProperty('--fill-percent', `${baseFillPercent}%`);
+    rowEl.style.setProperty('--boost-start-percent', `${baseFillPercent}%`);
+    rowEl.style.setProperty('--boost-end-percent', `${totalFillPercent}%`);
     rowEl.style.setProperty('--fill-color', fillColor);
+    rowEl.classList.toggle('site-item-boosted', clampedVolume > DEFAULT_VOLUME);
     rowEl.classList.toggle('site-item-unsaved', !isSaved);
     rowEl.classList.toggle('site-item-saved', isSaved);
   };
@@ -307,7 +367,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     slider.type = 'range';
     slider.className = 'site-slider-input';
     slider.min = '0';
-    slider.max = '100';
+    slider.max = String(MAX_VOLUME);
     slider.step = '1';
     slider.value = String(row.volume);
     slider.setAttribute('aria-label', `Volume for ${safeHostname(row.origin)}`);
@@ -342,7 +402,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const volumeInput = document.createElement('input');
     volumeInput.type = 'number';
     volumeInput.min = '0';
-    volumeInput.max = '100';
+    volumeInput.max = String(MAX_VOLUME);
     volumeInput.step = '1';
     volumeInput.value = String(row.volume);
     volumeInput.className = 'site-volume-input';
@@ -375,8 +435,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
-      const { immediate = false } = options;
-      const nextVolume = clampVolume(rawVolume);
+      const { immediate = false, source = 'generic' } = options;
+      const currentVolume = clampVolume(slider.value);
+      const nextVolume = getStickyVolume(rawVolume, currentVolume, source);
       pendingVolume = nextVolume;
 
       // Keep interaction silky while dragging; commit storage/script updates debounced.
@@ -438,7 +499,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     slider.addEventListener('input', async () => {
-      await scheduleCommitVolume(slider.value);
+      await scheduleCommitVolume(slider.value, { source: 'slider' });
     });
 
     li.addEventListener('wheel', async (event) => {
@@ -450,22 +511,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       const direction = event.deltaY < 0 ? 1 : -1;
       const deltaMultiplier = Math.max(1, Math.min(6, Math.round(Math.abs(event.deltaY) / 40)));
       const step = WHEEL_VOLUME_STEP * deltaMultiplier;
-      const nextVolume = clampVolume(Number(slider.value) + (direction * step));
-      await scheduleCommitVolume(nextVolume);
+      const currentVolume = clampVolume(Number(slider.value));
+      const firstAlignedTarget = getFirstWheelAlignedVolume(currentVolume, direction);
+      const nextVolume = currentVolume % WHEEL_VOLUME_STEP === 0
+        ? clampVolume(currentVolume + (direction * step))
+        : clampVolume(firstAlignedTarget);
+      await scheduleCommitVolume(nextVolume, { source: 'wheel' });
     }, { passive: false });
 
     volumeInput.addEventListener('input', async () => {
       if (volumeInput.value === '') {
         return;
       }
-      await scheduleCommitVolume(volumeInput.value);
+      await scheduleCommitVolume(volumeInput.value, { source: 'input' });
     });
 
     volumeInput.addEventListener('blur', async () => {
       if (volumeInput.value === '') {
         volumeInput.value = slider.value;
       }
-      await scheduleCommitVolume(volumeInput.value, { immediate: true });
+      await scheduleCommitVolume(volumeInput.value, { immediate: true, source: 'input' });
     });
 
     volumeInput.addEventListener('focus', () => {
@@ -500,7 +565,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const controls = document.createElement('div');
     controls.className = 'site-controls';
-    controls.appendChild(volumeInput);
+
+    const volumeInputWrap = document.createElement('div');
+    volumeInputWrap.className = 'site-volume-wrap';
+    const volumeSuffix = document.createElement('span');
+    volumeSuffix.className = 'site-volume-suffix';
+    volumeSuffix.textContent = '%';
+
+    volumeInputWrap.appendChild(volumeInput);
+    volumeInputWrap.appendChild(volumeSuffix);
+
+    controls.appendChild(volumeInputWrap);
     controls.appendChild(removeButton);
 
     content.appendChild(gotoButton);
@@ -701,7 +776,48 @@ function clampVolume(rawVolume) {
   if (Number.isNaN(num)) {
     return DEFAULT_VOLUME;
   }
-  return Math.max(0, Math.min(100, Math.round(num)));
+  return Math.max(0, Math.min(MAX_VOLUME, Math.round(num)));
+}
+
+function getFirstWheelAlignedVolume(currentVolume, direction) {
+  if (currentVolume % WHEEL_VOLUME_STEP === 0) {
+    return currentVolume;
+  }
+
+  if (direction > 0) {
+    return Math.ceil(currentVolume / WHEEL_VOLUME_STEP) * WHEEL_VOLUME_STEP;
+  }
+
+  return Math.floor(currentVolume / WHEEL_VOLUME_STEP) * WHEEL_VOLUME_STEP;
+}
+
+function getStickyVolume(rawVolume, previousVolume, source) {
+  const candidate = clampVolume(rawVolume);
+
+  // Keep manual typing predictable; sticky mode is for wheel/slider interaction.
+  if (source === 'input') {
+    return candidate;
+  }
+
+  const nearestMark = Math.round(candidate / STICKY_MARK_STEP) * STICKY_MARK_STEP;
+  const boundedMark = clampVolume(nearestMark);
+
+  const isNearMark = Math.abs(candidate - boundedMark) <= STICKY_SNAP_TOLERANCE;
+  if (isNearMark) {
+    return boundedMark;
+  }
+
+  if (source === 'wheel') {
+    const low = Math.min(previousVolume, candidate);
+    const high = Math.max(previousVolume, candidate);
+    for (let mark = STICKY_MARK_STEP; mark <= MAX_VOLUME; mark += STICKY_MARK_STEP) {
+      if (low < mark && high > mark) {
+        return mark;
+      }
+    }
+  }
+
+  return candidate;
 }
 
 function safeHostname(site) {

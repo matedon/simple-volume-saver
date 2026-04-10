@@ -8,6 +8,18 @@ https://github.com/kaan0d/simple-volume-saver
 
 Huge thanks to **Kaan** for the original implementation and open-source base.
 
+## [2026-04-10] - 1.1.0
+### Added
+- 500% volume mode with GainNode-based boosting.
+- Sticky snap behavior for 100-step marks during wheel/slider interaction.
+- Inactive presets toggle in the popup.
+
+### Changed
+- Extension name updated to **Tab Sound Mixer 500% Volume Booster**.
+- Inactive preset rows are hidden by default.
+- 100%+ slider visual now uses a dedicated `+` boost pattern zone.
+- Volume input now shows a `%` suffix.
+
 ## [2026-04-09] - Mixer UX update
 ### Added
 - Tab-level mixer rows (multiple open tabs from the same domain are listed separately).

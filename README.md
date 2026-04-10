@@ -1,6 +1,6 @@
-# Simple Volume Saver
+# Tab Sound Mixer 500% Volume Booster
 
-Simple Volume Saver is a Chromium extension to control media volume per website (and currently per open tab in the popup mixer).
+Tab Sound Mixer 500% Volume Booster is a Chromium extension to control media volume per website (and currently per open tab in the popup mixer).
 
 ## Fork Notice
 This repository is a fork of the original project by Kaan:
