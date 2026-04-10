@@ -38,6 +38,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   let isExpanded = false;
   let isConfirmingDelete = false;
+  let showInactivePresets = false;
   let addPulseTimeoutId = null;
 
   const applyVolumeToTab = async (tabId, volume) => {
@@ -247,6 +248,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     return rows;
   };
+
+  const isInactivePresetRow = (row) => row.rowType === 'origin';
 
   const setRowVisualState = (rowEl, volume, isSaved) => {
     const clampedVolume = clampVolume(volume);
@@ -529,14 +532,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     siteListEl.innerHTML = '';
 
     const rows = await buildListRows();
-    const rowsToShow = isExpanded ? rows : rows.slice(0, VISIBLE_SITES_LIMIT);
+    const activeRows = rows.filter((row) => !isInactivePresetRow(row));
+    const inactivePresetRows = rows.filter((row) => isInactivePresetRow(row));
+    const displayRows = showInactivePresets ? [...activeRows, ...inactivePresetRows] : activeRows;
+    const rowsToShow = isExpanded ? displayRows : displayRows.slice(0, VISIBLE_SITES_LIMIT);
 
     for (const row of rowsToShow) {
       const rowEl = await renderRow(row);
       siteListEl.appendChild(rowEl);
     }
 
-    if (isExpanded && rows.length > 0) {
+    if (isExpanded && displayRows.length > 0) {
       if (!isConfirmingDelete) {
         const deleteAllButton = document.createElement('button');
         deleteAllButton.className = 'btn btn-danger btn-block';
@@ -578,7 +584,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    if (rows.length > VISIBLE_SITES_LIMIT) {
+    if (displayRows.length > VISIBLE_SITES_LIMIT) {
       const toggleButton = document.createElement('button');
       toggleButton.className = 'btn btn-outline btn-block';
       toggleButton.type = 'button';
@@ -590,6 +596,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       siteListEl.appendChild(toggleButton);
+    }
+
+    if (inactivePresetRows.length > 0) {
+      const inactiveToggleButton = document.createElement('button');
+      inactiveToggleButton.className = 'btn btn-outline btn-block';
+      inactiveToggleButton.type = 'button';
+      inactiveToggleButton.textContent = showInactivePresets
+        ? 'Hide Inactive Presets'
+        : `Show Inactive Presets (${inactivePresetRows.length})`;
+      inactiveToggleButton.addEventListener('click', () => {
+        showInactivePresets = !showInactivePresets;
+        isExpanded = false;
+        isConfirmingDelete = false;
+        displaySites();
+      });
+      siteListEl.appendChild(inactiveToggleButton);
     }
 
     await updateAddButtonState();
