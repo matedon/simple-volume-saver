@@ -13,12 +13,15 @@ Huge thanks to **Kaan** for the original implementation and open-source base.
 - 500% volume mode with GainNode-based boosting.
 - Sticky snap behavior for 100-step marks during wheel/slider interaction.
 - Inactive presets toggle in the popup.
+- Firefox package variant in `simple-volume-saver__firefox`.
 
 ### Changed
 - Extension name updated to **Tab Sound Mixer 500% Volume Booster**.
 - Inactive preset rows are hidden by default.
 - 100%+ slider visual now uses a dedicated `+` boost pattern zone.
 - Volume input now shows a `%` suffix.
+- Chrome package folder renamed to `simple-volume-saver__chrome`.
+- Replaced extension icons (16/48/128/512) with the new TSM50VB logo in both Chrome and Firefox packages.
 
 ## [2026-04-09] - Mixer UX update
 ### Added
