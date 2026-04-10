@@ -8,6 +8,15 @@ https://github.com/kaan0d/simple-volume-saver
 
 Huge thanks to **Kaan** for the original implementation and open-source base.
 
+## [2026-04-10] - 1.1.1
+### Added
+- Shared source layout under `shared/common` for cross-browser files.
+- Dist builder script: `scripts/build-dist.ps1` to assemble `dist/chrome` and `dist/firefox` from shared files + browser-specific manifests.
+
+### Changed
+- Popup/session behavior now uses origin-level temporary overrides, so new tabs on the same domain inherit the current volume within the same browser session.
+- Unpacked loading workflow now targets `dist/chrome` and `dist/firefox` after build.
+
 ## [2026-04-10] - 1.1.0
 ### Added
 - 500% volume mode with GainNode-based boosting.

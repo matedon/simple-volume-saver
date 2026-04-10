@@ -21,25 +21,12 @@
 // SOFTWARE.
 
 const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:']);
-const TAB_OVERRIDES_KEY = 'tabVolumeOverrides';
+const ORIGIN_OVERRIDES_KEY = 'originVolumeOverrides';
 const MAX_VOLUME = 500;
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' || changeInfo.audible !== undefined) {
     handleTabAudio(tabId, tab);
-  }
-});
-
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  try {
-    const data = await chrome.storage.session.get([TAB_OVERRIDES_KEY]);
-    const overrides = data?.[TAB_OVERRIDES_KEY] || {};
-    if (Object.prototype.hasOwnProperty.call(overrides, String(tabId))) {
-      delete overrides[String(tabId)];
-      await chrome.storage.session.set({ [TAB_OVERRIDES_KEY]: overrides });
-    }
-  } catch {
-    // Ignore session storage issues.
   }
 });
 
@@ -54,23 +41,23 @@ async function handleTabAudio(tabId, tab) {
   try {
     [syncData, sessionData] = await Promise.all([
       chrome.storage.sync.get(['siteList']),
-      chrome.storage.session.get([TAB_OVERRIDES_KEY])
+      chrome.storage.session.get([ORIGIN_OVERRIDES_KEY])
     ]);
   } catch {
     return;
   }
 
   const siteList = syncData?.siteList || {};
-  const overrides = sessionData?.[TAB_OVERRIDES_KEY] || {};
-  const tabOverride = overrides[String(tabId)];
+  const overrides = sessionData?.[ORIGIN_OVERRIDES_KEY] || {};
+  const originOverride = overrides[origin];
   const hasSiteRule = Object.prototype.hasOwnProperty.call(siteList, origin);
-  const hasTabOverride = tabOverride !== undefined;
+  const hasOriginOverride = originOverride !== undefined;
 
-  if (!hasTabOverride && !hasSiteRule) {
+  if (!hasOriginOverride && !hasSiteRule) {
     return;
   }
 
-  const volume = clampVolume(hasTabOverride ? tabOverride : siteList[origin]);
+  const volume = clampVolume(hasOriginOverride ? originOverride : siteList[origin]);
 
   try {
     await chrome.scripting.executeScript({

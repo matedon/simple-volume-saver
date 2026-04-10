@@ -28,7 +28,7 @@ const WHEEL_VOLUME_STEP = 5;
 const STICKY_MARK_STEP = 100;
 const STICKY_SNAP_TOLERANCE = 4;
 const VOLUME_COMMIT_DEBOUNCE_MS = 140;
-const TAB_OVERRIDES_KEY = 'tabVolumeOverrides';
+const ORIGIN_OVERRIDES_KEY = 'originVolumeOverrides';
 
 document.addEventListener('DOMContentLoaded', async () => {
   const addSiteBtn = document.getElementById('addSiteBtn');
@@ -148,41 +148,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     await chrome.storage.sync.set({ siteList });
   };
 
-  const getTabOverrides = async () => {
+  const getOriginOverrides = async () => {
     try {
-      const data = await chrome.storage.session.get([TAB_OVERRIDES_KEY]);
-      return data?.[TAB_OVERRIDES_KEY] || {};
+      const data = await chrome.storage.session.get([ORIGIN_OVERRIDES_KEY]);
+      return data?.[ORIGIN_OVERRIDES_KEY] || {};
     } catch {
       return {};
     }
   };
 
-  const setTabOverrides = async (overrides) => {
+  const setOriginOverrides = async (overrides) => {
     try {
-      await chrome.storage.session.set({ [TAB_OVERRIDES_KEY]: overrides });
+      await chrome.storage.session.set({ [ORIGIN_OVERRIDES_KEY]: overrides });
     } catch {
       // Ignore on browsers without session storage support.
     }
   };
 
-  const setTabOverride = async (tabId, volume) => {
-    if (!Number.isInteger(tabId)) {
+  const setOriginOverride = async (origin, volume) => {
+    if (!origin) {
       return;
     }
 
-    const overrides = await getTabOverrides();
-    overrides[String(tabId)] = clampVolume(volume);
-    await setTabOverrides(overrides);
+    const overrides = await getOriginOverrides();
+    overrides[origin] = clampVolume(volume);
+    await setOriginOverrides(overrides);
   };
 
-  const clearTabOverride = async (tabId) => {
-    if (!Number.isInteger(tabId)) {
+  const clearOriginOverride = async (origin) => {
+    if (!origin) {
       return;
     }
 
-    const overrides = await getTabOverrides();
-    delete overrides[String(tabId)];
-    await setTabOverrides(overrides);
+    const overrides = await getOriginOverrides();
+    delete overrides[origin];
+    await setOriginOverrides(overrides);
   };
 
   const clearOverridesForOrigin = async (origin) => {
@@ -190,35 +190,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    const tabs = await chrome.tabs.query({});
-    const overrides = await getTabOverrides();
-
-    tabs.forEach((tab) => {
-      if (getOrigin(tab.url) === origin && Number.isInteger(tab.id)) {
-        delete overrides[String(tab.id)];
-      }
-    });
-
-    await setTabOverrides(overrides);
+    await clearOriginOverride(origin);
   };
 
-  const pruneOverridesForClosedTabs = async (tabs) => {
-    const overrides = await getTabOverrides();
-    const openIds = new Set(tabs.filter((tab) => Number.isInteger(tab.id)).map((tab) => String(tab.id)));
-
-    let changed = false;
-    for (const tabId of Object.keys(overrides)) {
-      if (!openIds.has(tabId)) {
-        delete overrides[tabId];
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      await setTabOverrides(overrides);
-    }
-
-    return overrides;
+  const pruneOverridesForClosedTabs = async () => {
+    return getOriginOverrides();
   };
 
   const buildListRows = async () => {
@@ -228,7 +204,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const allTabs = await chrome.tabs.query({});
     const supportedTabs = allTabs.filter((tab) => getOrigin(tab.url));
-    const overrides = await pruneOverridesForClosedTabs(supportedTabs);
+    const overrides = await pruneOverridesForClosedTabs();
 
     const rows = [];
     const usedTabIds = new Set();
@@ -248,8 +224,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       openOrigins.add(origin);
 
       const savedVolume = savedSet.has(origin) ? clampVolume(siteList[origin]) : DEFAULT_VOLUME;
-      const overrideVolume = Object.prototype.hasOwnProperty.call(overrides, String(tab.id))
-        ? clampVolume(overrides[String(tab.id)])
+      const overrideVolume = Object.prototype.hasOwnProperty.call(overrides, origin)
+        ? clampVolume(overrides[origin])
         : null;
 
       rows.push({
@@ -420,8 +396,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const runCommittedVolume = async (nextVolume) => {
       if (row.rowType === 'tab' && Number.isInteger(row.tabId)) {
-        await setTabOverride(row.tabId, nextVolume);
-        await applyVolumeToTab(row.tabId, nextVolume);
+        await setOriginOverride(row.origin, nextVolume);
+        await applyVolumeToOriginTabs(row.origin, nextVolume);
       } else {
         await setSiteVolume(row.origin, nextVolume);
         await applyVolumeToOriginTabs(row.origin, nextVolume);
@@ -640,7 +616,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         yesButton.textContent = 'Yes, Remove All';
         yesButton.addEventListener('click', async () => {
           await chrome.storage.sync.set({ siteList: {} });
-          await setTabOverrides({});
+          await setOriginOverrides({});
           isConfirmingDelete = false;
           isExpanded = false;
           await displaySites();
@@ -739,8 +715,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     displaySites();
   };
 
-  const onTabRemoved = async (tabId) => {
-    await clearTabOverride(tabId);
+  const onTabRemoved = async () => {
     displaySites();
   };
 

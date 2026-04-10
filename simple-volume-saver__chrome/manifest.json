@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tab Sound Mixer 500% Volume Booster",
   "description": "Per-site and per-tab mixer with up to 500% GainNode volume boost and saved presets.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "permissions": ["tabs", "storage", "scripting"],
   "action": {
     "default_popup": "popup.html",
