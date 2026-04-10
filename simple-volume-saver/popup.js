@@ -254,9 +254,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const setRowVisualState = (rowEl, volume, isSaved) => {
     const clampedVolume = clampVolume(volume);
     const isAudibleRow = rowEl.classList.contains('site-item-audible');
+    const isInactivePreset = rowEl.classList.contains('site-item-inactive-preset');
     const fillColor = isAudibleRow
       ? 'var(--slider-playing)'
-      : (isSaved ? 'var(--slider-fill)' : 'var(--slider-unsaved)');
+      : (isInactivePreset ? 'var(--slider-unsaved)' : (isSaved ? 'var(--slider-fill)' : 'var(--slider-unsaved)'));
 
     rowEl.style.setProperty('--fill-percent', `${clampedVolume}%`);
     rowEl.style.setProperty('--fill-color', fillColor);
@@ -292,6 +293,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const li = document.createElement('li');
     li.className = 'site-item site-item-slider';
     li.classList.toggle('site-item-audible', row.isAudible);
+    li.classList.toggle('site-item-inactive-preset', row.rowType === 'origin');
     li.dataset.origin = row.origin;
     li.dataset.saved = row.isSaved ? '1' : '0';
     li.dataset.rowKey = row.key;
