@@ -23,12 +23,17 @@
 const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:']);
 const DEFAULT_VOLUME = 100;
 const MAX_VOLUME = 500;
+const NORMAL_VOLUME_MAX = 100;
 const VISIBLE_SITES_LIMIT = 12;
-const WHEEL_VOLUME_STEP = 5;
-const STICKY_MARK_STEP = 100;
-const STICKY_SNAP_TOLERANCE = 4;
+const LOW_RANGE_STEP = 5;
+const HIGH_RANGE_STEP = 25;
+const SLIDER_UI_MAX = 160;
+const SLIDER_UI_SPLIT = 80;
 const VOLUME_COMMIT_DEBOUNCE_MS = 140;
 const ORIGIN_OVERRIDES_KEY = 'originVolumeOverrides';
+const ORIGIN_AUDIO_METHODS_KEY = 'originAudioMethods';
+const AUDIO_METHOD_STANDARD = 'standard';
+const AUDIO_METHOD_NEGATIVE_GAIN = 'negative_gain';
 
 document.addEventListener('DOMContentLoaded', async () => {
   const addSiteBtn = document.getElementById('addSiteBtn');
@@ -43,77 +48,107 @@ document.addEventListener('DOMContentLoaded', async () => {
   let isConfirmingDelete = false;
   let showInactivePresets = false;
   let addPulseTimeoutId = null;
+  let rowMethodMenuEl = null;
 
-  const applyVolumeToTab = async (tabId, volume) => {
+  const closeRowMethodMenu = () => {
+    if (rowMethodMenuEl) {
+      rowMethodMenuEl.remove();
+      rowMethodMenuEl = null;
+    }
+  };
+
+  const openRowMethodMenu = (event, row, slider, li) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeRowMethodMenu();
+
+    const menu = document.createElement('div');
+    menu.className = 'row-method-menu';
+    menu.setAttribute('role', 'menu');
+
+    const addOption = (label, value) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'row-method-menu-item';
+      if (row.audioMethod === value) {
+        btn.classList.add('is-active');
+      }
+      btn.textContent = label;
+      btn.addEventListener('click', async () => {
+        await setOriginAudioMethod(row.origin, value);
+        row.audioMethod = value;
+        li.dataset.audioMethod = value;
+        await applyVolumeToOriginTabs(row.origin, sliderPositionToVolume(slider.value));
+        closeRowMethodMenu();
+      });
+      menu.appendChild(btn);
+    };
+
+    addOption('Original (Default)', AUDIO_METHOD_STANDARD);
+    addOption('Negative Gain Fallback', AUDIO_METHOD_NEGATIVE_GAIN);
+
+    document.body.appendChild(menu);
+    rowMethodMenuEl = menu;
+
+    const menuRect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(4, window.innerWidth - menuRect.width - 4);
+    const maxTop = Math.max(4, window.innerHeight - menuRect.height - 4);
+    const left = Math.max(4, Math.min(event.clientX, maxLeft));
+    const top = Math.max(4, Math.min(event.clientY, maxTop));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  };
+
+  const normalizeAudioMethod = (method) => (
+    method === AUDIO_METHOD_NEGATIVE_GAIN ? AUDIO_METHOD_NEGATIVE_GAIN : AUDIO_METHOD_STANDARD
+  );
+
+  const getOriginAudioMethods = async () => {
+    const data = await chrome.storage.sync.get([ORIGIN_AUDIO_METHODS_KEY]);
+    return data?.[ORIGIN_AUDIO_METHODS_KEY] || {};
+  };
+
+  const getOriginAudioMethod = async (origin) => {
+    if (!origin) {
+      return AUDIO_METHOD_STANDARD;
+    }
+    const methods = await getOriginAudioMethods();
+    return normalizeAudioMethod(methods[origin]);
+  };
+
+  const setOriginAudioMethod = async (origin, method) => {
+    if (!origin) {
+      return;
+    }
+
+    const methods = await getOriginAudioMethods();
+    const normalized = normalizeAudioMethod(method);
+
+    if (normalized === AUDIO_METHOD_STANDARD) {
+      delete methods[origin];
+    } else {
+      methods[origin] = normalized;
+    }
+
+    await chrome.storage.sync.set({ [ORIGIN_AUDIO_METHODS_KEY]: methods });
+  };
+
+  const applyVolumeToTab = async (tabId, volume, audioMethod = AUDIO_METHOD_STANDARD) => {
     if (!Number.isInteger(tabId)) {
       return;
     }
 
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId, allFrames: true },
-        func: (nextVolume, maxVolume) => {
-          const requestedVolume = Number(nextVolume);
-          const safeVolume = Number.isFinite(requestedVolume)
-            ? Math.max(0, Math.min(maxVolume, requestedVolume))
-            : 100;
-          const gainValue = safeVolume / 100;
-          const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-
-          const applyFallbackVolume = (media) => {
-            media.volume = Math.max(0, Math.min(1, safeVolume / 100));
-          };
-
-          const ensureGainNode = (media) => {
-            if (!AudioContextCtor) {
-              return null;
-            }
-
-            try {
-              if (!window.__svsAudioContext) {
-                window.__svsAudioContext = new AudioContextCtor();
-              }
-
-              if (!window.__svsGainNodeMap) {
-                window.__svsGainNodeMap = new WeakMap();
-              }
-
-              const ctx = window.__svsAudioContext;
-              let nodePack = window.__svsGainNodeMap.get(media);
-
-              if (!nodePack) {
-                const sourceNode = ctx.createMediaElementSource(media);
-                const gainNode = ctx.createGain();
-                sourceNode.connect(gainNode);
-                gainNode.connect(ctx.destination);
-                nodePack = { gainNode };
-                window.__svsGainNodeMap.set(media, nodePack);
-              }
-
-              nodePack.gainNode.gain.value = gainValue;
-              media.volume = 1;
-
-              if (ctx.state === 'suspended') {
-                ctx.resume().catch(() => {});
-              }
-
-              return nodePack;
-            } catch {
-              return null;
-            }
-          };
-
-          document.querySelectorAll('video, audio').forEach((media) => {
-            const nodePack = ensureGainNode(media);
-            if (!nodePack) {
-              applyFallbackVolume(media);
-            }
-          });
-        },
-        args: [volume, MAX_VOLUME]
+      await chrome.runtime.sendMessage({
+        command: 'svsRefreshTabAudio',
+        tabId
       });
-    } catch {
-      // Ignore tabs where script injection is not allowed.
+    } catch (error) {
+      console.warn('[SVS][popup] Script injection failed', {
+        tabId,
+        error: String(error?.message || error),
+        name: error?.name || null
+      });
     }
   };
 
@@ -122,11 +157,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    const audioMethod = await getOriginAudioMethod(origin);
     const allTabs = await chrome.tabs.query({});
     const matchingTabs = allTabs.filter((tab) => getOrigin(tab.url) === origin);
 
     for (const tab of matchingTabs) {
-      await applyVolumeToTab(tab.id, volume);
+      await applyVolumeToTab(tab.id, volume, audioMethod);
     }
   };
 
@@ -150,7 +186,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const getOriginOverrides = async () => {
     try {
-      const data = await chrome.storage.session.get([ORIGIN_OVERRIDES_KEY]);
+      const data = await chrome.storage.local.get([ORIGIN_OVERRIDES_KEY]);
       return data?.[ORIGIN_OVERRIDES_KEY] || {};
     } catch {
       return {};
@@ -159,9 +195,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const setOriginOverrides = async (overrides) => {
     try {
-      await chrome.storage.session.set({ [ORIGIN_OVERRIDES_KEY]: overrides });
+      await chrome.storage.local.set({ [ORIGIN_OVERRIDES_KEY]: overrides });
     } catch {
-      // Ignore on browsers without session storage support.
+      // Ignore storage write failures.
     }
   };
 
@@ -199,6 +235,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const buildListRows = async () => {
     const siteList = await getSiteList();
+    const audioMethods = await getOriginAudioMethods();
     const savedOrigins = Object.keys(siteList);
     const savedSet = new Set(savedOrigins);
 
@@ -208,9 +245,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const rows = [];
     const usedTabIds = new Set();
-    const openOrigins = new Set();
+    const tabsByOrigin = new Map();
 
-    const pushTabRow = (tab, isCurrentPriority = false) => {
+    const pushTabRow = (tab) => {
       if (!Number.isInteger(tab.id) || usedTabIds.has(tab.id)) {
         return;
       }
@@ -221,7 +258,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       usedTabIds.add(tab.id);
-      openOrigins.add(origin);
 
       const savedVolume = savedSet.has(origin) ? clampVolume(siteList[origin]) : DEFAULT_VOLUME;
       const overrideVolume = Object.prototype.hasOwnProperty.call(overrides, origin)
@@ -237,41 +273,102 @@ document.addEventListener('DOMContentLoaded', async () => {
         faviconUrl: resolveFaviconUrl(origin, tab.favIconUrl),
         title: tab.title || '',
         isAudible: Boolean(tab.audible),
-        isCurrent: isCurrentPriority || tab.id === currentTabId,
+        isCurrent: tab.id === currentTabId,
         isSaved: savedSet.has(origin),
         volume: overrideVolume ?? savedVolume,
-        hasOverride: overrideVolume !== null
+        hasOverride: overrideVolume !== null,
+        audioMethod: normalizeAudioMethod(audioMethods[origin])
       });
     };
 
-    const currentTab = supportedTabs.find((tab) => tab.id === currentTabId);
-    if (currentTab) {
-      pushTabRow(currentTab, true);
+    supportedTabs.forEach((tab) => {
+      const origin = getOrigin(tab.url);
+      if (!origin) {
+        return;
+      }
+
+      if (!tabsByOrigin.has(origin)) {
+        tabsByOrigin.set(origin, []);
+      }
+      tabsByOrigin.get(origin).push(tab);
+    });
+
+    const processOrigin = (origin, tabs) => {
+      if (!tabs || tabs.length === 0) {
+        return;
+      }
+
+      const audibleTabs = tabs.filter((tab) => Boolean(tab.audible));
+      if (audibleTabs.length > 0) {
+        const sortedAudibleTabs = [...audibleTabs].sort((a, b) => {
+          if (a.id === currentTabId) {
+            return -1;
+          }
+          if (b.id === currentTabId) {
+            return 1;
+          }
+          return 0;
+        });
+
+        sortedAudibleTabs.forEach((tab) => pushTabRow(tab));
+        return;
+      }
+
+      if (origin !== currentOrigin && !savedSet.has(origin)) {
+        return;
+      }
+
+      const representativeTab = tabs.find((tab) => tab.id === currentTabId)
+        || tabs.find((tab) => tab.active)
+        || tabs[0];
+
+      if (representativeTab) {
+        pushTabRow(representativeTab);
+      }
+    };
+
+    if (currentOrigin && tabsByOrigin.has(currentOrigin)) {
+      processOrigin(currentOrigin, tabsByOrigin.get(currentOrigin));
     }
 
-    supportedTabs
-      .filter((tab) => tab.id !== currentTabId && tab.audible)
-      .forEach((tab) => pushTabRow(tab));
+    tabsByOrigin.forEach((tabs, origin) => {
+      if (origin === currentOrigin) {
+        return;
+      }
 
-    supportedTabs
-      .filter((tab) => tab.id !== currentTabId && !tab.audible && savedSet.has(getOrigin(tab.url)))
-      .forEach((tab) => pushTabRow(tab));
+      if (tabs.some((tab) => Boolean(tab.audible))) {
+        processOrigin(origin, tabs);
+      }
+    });
+
+    tabsByOrigin.forEach((tabs, origin) => {
+      if (origin === currentOrigin) {
+        return;
+      }
+
+      if (!tabs.some((tab) => Boolean(tab.audible)) && savedSet.has(origin)) {
+        processOrigin(origin, tabs);
+      }
+    });
+
+    const openOrigins = new Set(tabsByOrigin.keys());
 
     savedOrigins.forEach((origin) => {
       if (!openOrigins.has(origin)) {
-      rows.push({
-        key: `origin:${origin}`,
-        rowType: 'origin',
-        tabId: null,
-        windowId: null,
-        origin,
-        faviconUrl: resolveFaviconUrl(origin, null),
-        title: '',
-        isAudible: false,
-        isCurrent: origin === currentOrigin,
-        isSaved: true,
+        rows.push({
+          key: `origin:${origin}`,
+          rowType: 'origin',
+          tabId: null,
+          windowId: null,
+          origin,
+          faviconUrl: resolveFaviconUrl(origin, null),
+          title: '',
+          isAudible: false,
+          isCurrent: origin === currentOrigin,
+          isSaved: true,
           volume: clampVolume(siteList[origin]),
-          hasOverride: false
+          hasOverride: false,
+          audioMethod: normalizeAudioMethod(audioMethods[origin])
         });
       }
     });
@@ -289,14 +386,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       ? 'var(--slider-playing)'
       : (isInactivePreset ? 'var(--slider-unsaved)' : (isSaved ? 'var(--slider-fill)' : 'var(--slider-unsaved)'));
 
-    const baseVolume = Math.min(clampedVolume, DEFAULT_VOLUME);
-    const baseFillPercent = (baseVolume / MAX_VOLUME) * 100;
-    const totalFillPercent = (clampedVolume / MAX_VOLUME) * 100;
+    const baseVolume = Math.min(clampedVolume, NORMAL_VOLUME_MAX);
+    const baseFillPercent = (volumeToSliderPosition(baseVolume) / SLIDER_UI_MAX) * 100;
+    const totalFillPercent = (volumeToSliderPosition(clampedVolume) / SLIDER_UI_MAX) * 100;
     rowEl.style.setProperty('--fill-percent', `${baseFillPercent}%`);
     rowEl.style.setProperty('--boost-start-percent', `${baseFillPercent}%`);
     rowEl.style.setProperty('--boost-end-percent', `${totalFillPercent}%`);
     rowEl.style.setProperty('--fill-color', fillColor);
-    rowEl.classList.toggle('site-item-boosted', clampedVolume > DEFAULT_VOLUME);
+    rowEl.classList.toggle('site-item-boosted', clampedVolume > NORMAL_VOLUME_MAX);
     rowEl.classList.toggle('site-item-unsaved', !isSaved);
     rowEl.classList.toggle('site-item-saved', isSaved);
   };
@@ -333,19 +430,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     li.dataset.origin = row.origin;
     li.dataset.saved = row.isSaved ? '1' : '0';
     li.dataset.rowKey = row.key;
+    li.dataset.audioMethod = row.audioMethod || AUDIO_METHOD_STANDARD;
     if (Number.isInteger(row.tabId)) {
       li.dataset.tabId = String(row.tabId);
     }
 
-    setRowVisualState(li, row.volume, row.isSaved);
+    const initialVolume = snapVolumeToStep(row.volume);
+    setRowVisualState(li, initialVolume, row.isSaved);
 
     const slider = document.createElement('input');
     slider.type = 'range';
     slider.className = 'site-slider-input';
     slider.min = '0';
-    slider.max = String(MAX_VOLUME);
+    slider.max = String(SLIDER_UI_MAX);
     slider.step = '1';
-    slider.value = String(row.volume);
+    slider.value = String(volumeToSliderPosition(initialVolume));
     slider.setAttribute('aria-label', `Volume for ${safeHostname(row.origin)}`);
 
     const content = document.createElement('div');
@@ -380,7 +479,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     volumeInput.min = '0';
     volumeInput.max = String(MAX_VOLUME);
     volumeInput.step = '1';
-    volumeInput.value = String(row.volume);
+    volumeInput.value = String(initialVolume);
     volumeInput.className = 'site-volume-input';
     volumeInput.setAttribute('aria-label', `Volume percent for ${safeHostname(row.origin)}`);
 
@@ -392,7 +491,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     removeButton.disabled = !row.isSaved;
 
     let pendingCommitTimerId = null;
-    let pendingVolume = row.volume;
+    let pendingVolume = initialVolume;
 
     const runCommittedVolume = async (nextVolume) => {
       if (row.rowType === 'tab' && Number.isInteger(row.tabId)) {
@@ -412,12 +511,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       const { immediate = false, source = 'generic' } = options;
-      const currentVolume = clampVolume(slider.value);
-      const nextVolume = getStickyVolume(rawVolume, currentVolume, source);
+      const candidateVolume = source === 'slider'
+        ? sliderPositionToVolume(rawVolume)
+        : clampVolume(rawVolume);
+      const nextVolume = source === 'wheel'
+        ? clampVolume(candidateVolume)
+        : snapVolumeToStep(candidateVolume);
       pendingVolume = nextVolume;
 
       // Keep interaction silky while dragging; commit storage/script updates debounced.
-      slider.value = String(nextVolume);
+      slider.value = String(volumeToSliderPosition(nextVolume));
       volumeInput.value = String(nextVolume);
       setRowVisualState(li, nextVolume, row.isSaved);
 
@@ -485,13 +588,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       const direction = event.deltaY < 0 ? 1 : -1;
-      const deltaMultiplier = Math.max(1, Math.min(6, Math.round(Math.abs(event.deltaY) / 40)));
-      const step = WHEEL_VOLUME_STEP * deltaMultiplier;
-      const currentVolume = clampVolume(Number(slider.value));
-      const firstAlignedTarget = getFirstWheelAlignedVolume(currentVolume, direction);
-      const nextVolume = currentVolume % WHEEL_VOLUME_STEP === 0
-        ? clampVolume(currentVolume + (direction * step))
-        : clampVolume(firstAlignedTarget);
+      const currentVolume = clampVolume(Number(volumeInput.value));
+      const nextVolume = getWheelSteppedVolume(currentVolume, direction);
       await scheduleCommitVolume(nextVolume, { source: 'wheel' });
     }, { passive: false });
 
@@ -504,7 +602,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     volumeInput.addEventListener('blur', async () => {
       if (volumeInput.value === '') {
-        volumeInput.value = slider.value;
+        volumeInput.value = String(pendingVolume);
       }
       await scheduleCommitVolume(volumeInput.value, { immediate: true, source: 'input' });
     });
@@ -537,6 +635,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       await clearOverridesForOrigin(row.origin);
       await applyVolumeToOriginTabs(row.origin, DEFAULT_VOLUME);
       await displaySites();
+    });
+
+    li.addEventListener('contextmenu', (event) => {
+      openRowMethodMenu(event, row, slider, li);
     });
 
     const controls = document.createElement('div');
@@ -616,6 +718,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         yesButton.textContent = 'Yes, Remove All';
         yesButton.addEventListener('click', async () => {
           await chrome.storage.sync.set({ siteList: {} });
+          await chrome.storage.sync.set({ [ORIGIN_AUDIO_METHODS_KEY]: {} });
           await setOriginOverrides({});
           isConfirmingDelete = false;
           isExpanded = false;
@@ -712,10 +815,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   const onTabUpdated = () => {
+    closeRowMethodMenu();
     displaySites();
   };
 
   const onTabRemoved = async () => {
+    closeRowMethodMenu();
     displaySites();
   };
 
@@ -723,8 +828,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.tabs.onRemoved.addListener(onTabRemoved);
 
   window.addEventListener('unload', () => {
+    closeRowMethodMenu();
     chrome.tabs.onUpdated.removeListener(onTabUpdated);
     chrome.tabs.onRemoved.removeListener(onTabRemoved);
+  });
+
+  document.addEventListener('click', () => {
+    closeRowMethodMenu();
+  });
+
+  document.addEventListener('contextmenu', (event) => {
+    if (event.defaultPrevented) {
+      return;
+    }
+
+    if (!rowMethodMenuEl) {
+      return;
+    }
+
+    if (event.target instanceof Element && rowMethodMenuEl.contains(event.target)) {
+      return;
+    }
+
+    closeRowMethodMenu();
+  });
+
+  window.addEventListener('blur', () => {
+    closeRowMethodMenu();
   });
 
   await displaySites();
@@ -754,45 +884,70 @@ function clampVolume(rawVolume) {
   return Math.max(0, Math.min(MAX_VOLUME, Math.round(num)));
 }
 
-function getFirstWheelAlignedVolume(currentVolume, direction) {
-  if (currentVolume % WHEEL_VOLUME_STEP === 0) {
+function snapVolumeToStep(rawVolume) {
+  const volume = clampVolume(rawVolume);
+  if (volume <= NORMAL_VOLUME_MAX) {
+    return clampVolume(Math.round(volume / LOW_RANGE_STEP) * LOW_RANGE_STEP);
+  }
+
+  return clampVolume(
+    NORMAL_VOLUME_MAX + (Math.round((volume - NORMAL_VOLUME_MAX) / HIGH_RANGE_STEP) * HIGH_RANGE_STEP)
+  );
+}
+
+function volumeToSliderPosition(rawVolume) {
+  const volume = clampVolume(rawVolume);
+  if (volume <= NORMAL_VOLUME_MAX) {
+    return Math.round((volume / NORMAL_VOLUME_MAX) * SLIDER_UI_SPLIT);
+  }
+
+  return Math.round(
+    SLIDER_UI_SPLIT + (((volume - NORMAL_VOLUME_MAX) / (MAX_VOLUME - NORMAL_VOLUME_MAX)) * SLIDER_UI_SPLIT)
+  );
+}
+
+function sliderPositionToVolume(rawPosition) {
+  const position = Math.max(0, Math.min(SLIDER_UI_MAX, Math.round(Number(rawPosition))));
+  if (position <= SLIDER_UI_SPLIT) {
+    return snapVolumeToStep((position / SLIDER_UI_SPLIT) * NORMAL_VOLUME_MAX);
+  }
+
+  return snapVolumeToStep(
+    NORMAL_VOLUME_MAX + (((position - SLIDER_UI_SPLIT) / SLIDER_UI_SPLIT) * (MAX_VOLUME - NORMAL_VOLUME_MAX))
+  );
+}
+
+function alignVolumeToStepForDirection(currentVolume, direction) {
+  if (currentVolume <= NORMAL_VOLUME_MAX) {
+    if (currentVolume % LOW_RANGE_STEP === 0) {
+      return currentVolume;
+    }
+
+    return direction > 0
+      ? Math.ceil(currentVolume / LOW_RANGE_STEP) * LOW_RANGE_STEP
+      : Math.floor(currentVolume / LOW_RANGE_STEP) * LOW_RANGE_STEP;
+  }
+
+  const offset = currentVolume - NORMAL_VOLUME_MAX;
+  if (offset % HIGH_RANGE_STEP === 0) {
     return currentVolume;
   }
 
-  if (direction > 0) {
-    return Math.ceil(currentVolume / WHEEL_VOLUME_STEP) * WHEEL_VOLUME_STEP;
-  }
-
-  return Math.floor(currentVolume / WHEEL_VOLUME_STEP) * WHEEL_VOLUME_STEP;
+  return direction > 0
+    ? NORMAL_VOLUME_MAX + (Math.ceil(offset / HIGH_RANGE_STEP) * HIGH_RANGE_STEP)
+    : NORMAL_VOLUME_MAX + (Math.floor(offset / HIGH_RANGE_STEP) * HIGH_RANGE_STEP);
 }
 
-function getStickyVolume(rawVolume, previousVolume, source) {
-  const candidate = clampVolume(rawVolume);
+function getWheelSteppedVolume(rawCurrentVolume, direction) {
+  let volume = clampVolume(rawCurrentVolume);
+  volume = alignVolumeToStepForDirection(volume, direction);
 
-  // Keep manual typing predictable; sticky mode is for wheel/slider interaction.
-  if (source === 'input') {
-    return candidate;
-  }
+  const step = direction > 0
+    ? (volume >= NORMAL_VOLUME_MAX ? HIGH_RANGE_STEP : LOW_RANGE_STEP)
+    : (volume > NORMAL_VOLUME_MAX ? HIGH_RANGE_STEP : LOW_RANGE_STEP);
+  volume = clampVolume(volume + (direction * step));
 
-  const nearestMark = Math.round(candidate / STICKY_MARK_STEP) * STICKY_MARK_STEP;
-  const boundedMark = clampVolume(nearestMark);
-
-  const isNearMark = Math.abs(candidate - boundedMark) <= STICKY_SNAP_TOLERANCE;
-  if (isNearMark) {
-    return boundedMark;
-  }
-
-  if (source === 'wheel') {
-    const low = Math.min(previousVolume, candidate);
-    const high = Math.max(previousVolume, candidate);
-    for (let mark = STICKY_MARK_STEP; mark <= MAX_VOLUME; mark += STICKY_MARK_STEP) {
-      if (low < mark && high > mark) {
-        return mark;
-      }
-    }
-  }
-
-  return candidate;
+  return snapVolumeToStep(volume);
 }
 
 function safeHostname(site) {

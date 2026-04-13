@@ -8,6 +8,21 @@ https://github.com/kaan0d/simple-volume-saver
 
 Huge thanks to **Kaan** for the original implementation and open-source base.
 
+## [2026-04-13] - 1.1.3
+### Fixed
+- Stabilized volume application flow by routing popup-triggered tab updates through the background worker (`svsRefreshTabAudio`) to avoid conflicting tab injections.
+- Improved handling for sites where `createMediaElementSource` is blocked (`InvalidStateError`) by keeping those media elements on fallback volume mode.
+
+### Changed
+- Mixer list now splits same-domain rows only when multiple tabs are actively playing audio.
+- Slider UI now uses a two-zone scale: first half maps `0-100%`, second half maps `100-500%`.
+- Wheel volume stepping now follows range-aware increments: `5%` below `100%`, `25%` above `100%`.
+
+## [2026-04-13] - 1.1.2
+### Fixed
+- Origin-level tab volume overrides are now stored persistently in `chrome.storage.local` instead of `chrome.storage.session`.
+- Volume levels set from the popup now remain available after browser restart.
+
 ## [2026-04-10] - 1.1.1
 ### Added
 - Shared source layout under `shared/common` for cross-browser files.
